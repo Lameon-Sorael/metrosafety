@@ -1,0 +1,48 @@
+name: AI PR → Grok Bot webhook
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  notify-grok-bot:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: POST trusted PR metadata to Grok Bot
+        env:
+          WEBHOOK_URL: ${{ secrets.GROK_BOT_WEBHOOK_URL }}
+          WEBHOOK_KEY: ${{ secrets.GROK_BOT_WEBHOOK_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${WEBHOOK_URL}" ] || [ -z "${WEBHOOK_KEY}" ]; then
+            echo "::notice::Grok webhook secrets are not configured yet; skipping review notification."
+            exit 0
+          fi
+
+          python3 -c 'import os,sys;k=os.environ["WEBHOOK_KEY"];sys.exit(0 if (k.isascii() and k.startswith("crsr_") and not any(c.isspace() for c in k)) else 2)' || {
+            echo "Invalid webhook key format."
+            exit 2
+          }
+
+          payload="$(jq -c --arg repo "$GITHUB_REPOSITORY"             '{pr: .pull_request.number,
+              sha: .pull_request.head.sha,
+              branch: .pull_request.head.ref,
+              title: .pull_request.title,
+              url: .pull_request.html_url,
+              action: .action,
+              repo: $repo}'             "$GITHUB_EVENT_PATH")"
+
+          code="$(curl --silent --show-error             --max-time 30 --connect-timeout 10             --proto '=https'             --output /dev/null --write-out '%{http_code}'             --request POST "$WEBHOOK_URL"             --header "Authorization: Bearer ${WEBHOOK_KEY}"             --header "User-Agent: AI-Project-Template/pr-review"             --json "$payload")"
+
+          echo "Webhook HTTP status: ${code}"
+          if [ "$code" != "200" ]; then
+            echo "Grok Bot webhook did not accept the POST (HTTP ${code})."
+            exit 1
+          fi
